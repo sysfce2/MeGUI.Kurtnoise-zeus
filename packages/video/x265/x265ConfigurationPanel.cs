@@ -1318,7 +1318,15 @@ namespace MeGUI.packages.video.x265
 
         private void ch10BitsEncoder_CheckedChanged_1(object sender, EventArgs e)
         {
-            hevcProfileGroupbox.Enabled = !ch10BitsEncoder.Checked;
+            if (ch10BitsEncoder.Checked)
+            {
+                hevcProfile.SelectedIndex = 1; // Main 10 Profile
+                hevcProfileGroupbox.Enabled = false;
+            }
+            else
+            {
+                hevcProfileGroupbox.Enabled = true;
+            }
             updateEvent(sender, e);
         }
 

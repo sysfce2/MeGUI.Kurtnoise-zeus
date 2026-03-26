@@ -175,6 +175,17 @@ namespace MeGUI
             // bit-depth
             if (xs.X26510Bits)
                 sb.Append("--output-depth 10 ");
+
+            // HEVC Profile
+            if (!xs.CustomEncoderOptions.Contains("--profile "))
+            {
+                switch (xs.Profile)
+                {
+                    case 1: sb.Append("--profile main10 "); break;
+                    case 2: sb.Append("--profile mainstillpicture "); break;
+                    default: break; // index 0 = main profile (x265 default, no flag needed)
+                }
+            }
             #endregion
 
             string CustomSarValue;

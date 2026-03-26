@@ -2391,7 +2391,7 @@ namespace MeGUI.packages.video.x265
             // 
             this.hevcProfileGroupbox.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
             this.hevcProfileGroupbox.Controls.Add(this.hevcProfile);
-            this.hevcProfileGroupbox.Enabled = false;
+            this.hevcProfileGroupbox.Enabled = true;
             this.hevcProfileGroupbox.Location = new System.Drawing.Point(324, 71);
             this.hevcProfileGroupbox.Name = "hevcProfileGroupbox";
             this.hevcProfileGroupbox.Size = new System.Drawing.Size(172, 48);
