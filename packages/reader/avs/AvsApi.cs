@@ -20,9 +20,29 @@
 
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
 
 namespace MeGUI
 {
+    [Serializable]
+    public class AviSynthException : ApplicationException
+    {
+        public AviSynthException(SerializationInfo info, StreamingContext context) : base(info, context) { }
+        public AviSynthException(string message) : base(message) { }
+        public AviSynthException() : base() { }
+        public AviSynthException(string message, Exception innerException) : base(message, innerException) { }
+    }
+
+    public enum AudioSampleType : int
+    {
+        Unknown = 0,
+        INT8    = 1,
+        INT16   = 2,
+        INT24   = 4,
+        INT32   = 8,
+        FLOAT   = 16
+    }
+
     public static class AvsApi
     {
         public const string LibName = "avisynth";
@@ -143,5 +163,8 @@ namespace MeGUI
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         public delegate long GetCpuFlagsExDelegate(IntPtr env);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        public delegate IntPtr GetReadPtrPDelegate(IntPtr frame, int plane);
     }
 }

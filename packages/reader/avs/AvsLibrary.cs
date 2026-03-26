@@ -49,6 +49,7 @@ namespace MeGUI
         public bool HasFrameProps { get; private set; }
 
         public AvsApi.GetPitchPDelegate                GetPitchP                { get; private set; }
+        public AvsApi.GetReadPtrPDelegate              GetReadPtrP              { get; private set; }
         public AvsApi.GetCpuFlagsDelegate              GetCpuFlags              { get; private set; }
         public AvsApi.GetCpuFlagsExDelegate            GetCpuFlagsEx            { get; private set; }
         public bool HasCpuFlagsEx { get; private set; }
@@ -89,6 +90,7 @@ namespace MeGUI
             ReleaseVideoFrame       = Resolve<AvsApi.ReleaseVideoFrameDelegate>      ("avs_release_video_frame");
             ReleaseValue            = Resolve<AvsApi.ReleaseValueDelegate>           ("avs_release_value");
             GetPitchP               = Resolve<AvsApi.GetPitchPDelegate>              ("avs_get_pitch_p");
+            GetReadPtrP             = Resolve<AvsApi.GetReadPtrPDelegate>             ("avs_get_read_ptr_p");
             GetCpuFlags             = Resolve<AvsApi.GetCpuFlagsDelegate>            ("avs_get_cpu_flags");
             GetAudio                = Resolve<AvsApi.GetAudioDelegate>               ("avs_get_audio");
 

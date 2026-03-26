@@ -649,30 +649,9 @@ namespace MeGUI.core.util
             string fileDate = string.Empty;
             string fileProductName = string.Empty;
             bool bFoundInstalledAviSynth = false;
-            int iWrapperInterface = AviSynthClip.GetAvisynthWrapperInterfaceVersion();
 
             LogItem oLogInstalled = new LogItem("AviSynth");
             LogItem oLogPortable = new LogItem("AviSynth portable");
-
-            LogItem oLogWrapper = new LogItem("AviSynth Wrapper");
-            if (GetFileInformation(Path.GetDirectoryName(Application.ExecutablePath) + @"\AvisynthWrapper.dll", out fileVersion, out fileDate, out fileProductName))
-            {
-                if (!String.IsNullOrEmpty(fileVersion))
-                    oLogWrapper.LogValue("Version", fileVersion, false);
-                else
-                    oLogWrapper.LogValue("Version", "n/a", false);
-                if (!String.IsNullOrEmpty(fileDate))
-                    oLogWrapper.LogValue("Date", fileDate, false);
-                else
-                    oLogWrapper.LogValue("Date", "n/a", false);
-                if (iWrapperInterface > 0)
-                    oLogWrapper.LogValue("Interface", iWrapperInterface, false);
-                else
-                    oLogWrapper.LogValue("Interface", "n/a", false);
-            }
-            else
-                oLogWrapper.LogEvent("not installed", ImageType.Error, false);
-            oLog.Add(oLogWrapper);
 
             // remove portable avisynth files
             PortableAviSynthActions(true);

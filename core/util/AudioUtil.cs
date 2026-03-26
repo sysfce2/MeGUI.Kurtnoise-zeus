@@ -59,10 +59,17 @@ namespace MeGUI
             try
             {
                 strErrorText = String.Empty;
-                using (AviSynthClip a = AviSynthScriptEnvironment.ParseScript(strAVSScript))
-                if (a.ChannelsCount == 0)
-                    return false;
-                return true;
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
+                {
+                    IntPtr clip = session.EvalScript(strAVSScript);
+                    try
+                    {
+                        AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
+                        return info.AudioChannels > 0;
+                    }
+                    finally { lib.ReleaseClip(clip); }
+                }
             }
             catch (Exception ex)
             {
@@ -77,10 +84,18 @@ namespace MeGUI
             {
                 if (!Path.GetExtension(strAVSScript).ToLowerInvariant().Equals(".avs"))
                     return false;
-                using (AviSynthClip a = AviSynthScriptEnvironment.OpenScriptFile(strAVSScript))
-                if (!a.HasAudio)
-                    return false;
-                return true;
+                string script = string.Format("Import(\"{0}\")", strAVSScript.Replace("\\", "\\\\"));
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
+                {
+                    IntPtr clip = session.EvalScript(script);
+                    try
+                    {
+                        AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
+                        return info.NumAudioSamples > 0;
+                    }
+                    finally { lib.ReleaseClip(clip); }
+                }
             }
             catch
             {
@@ -94,8 +109,18 @@ namespace MeGUI
             {
                 if (!Path.GetExtension(strAVSScript).ToLowerInvariant().Equals(".avs"))
                     return 0;
-                using (AviSynthClip a = AviSynthScriptEnvironment.OpenScriptFile(strAVSScript))
-                    return a.ChannelsCount;
+                string script = string.Format("Import(\"{0}\")", strAVSScript.Replace("\\", "\\\\"));
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
+                {
+                    IntPtr clip = session.EvalScript(script);
+                    try
+                    {
+                        AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
+                        return info.AudioChannels;
+                    }
+                    finally { lib.ReleaseClip(clip); }
+                }
             }
             catch
             {
@@ -109,8 +134,18 @@ namespace MeGUI
             {
                 if (!Path.GetExtension(strAVSScript).ToLowerInvariant().Equals(".avs"))
                     return 0;
-                using (AviSynthClip a = AviSynthScriptEnvironment.OpenScriptFile(strAVSScript))
-                    return a.ChannelMask;
+                string script = string.Format("Import(\"{0}\")", strAVSScript.Replace("\\", "\\\\"));
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
+                {
+                    IntPtr clip = session.EvalScript(script);
+                    try
+                    {
+                        AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
+                        return info.ChannelMask;
+                    }
+                    finally { lib.ReleaseClip(clip); }
+                }
             }
             catch
             {

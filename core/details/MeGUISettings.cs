@@ -1773,7 +1773,6 @@ namespace MeGUI
             megui_help.UpdateInformation("data", "MeGUI Help", Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), @"Data\ContextHelp.xml"));
             megui_help.Required = true;
             megui_libs.UpdateInformation("libs", "MeGUI Libraries", Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), @"7z.dll"));
-            megui_libs.Files.Add(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), @"AvisynthWrapper.dll"));
             megui_libs.Files.Add(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), @"ICSharpCode.SharpZipLib.dll"));
             megui_libs.Files.Add(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), @"SevenZipSharp.dll"));
             megui_libs.Required = true;

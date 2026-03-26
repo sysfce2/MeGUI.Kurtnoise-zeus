@@ -720,8 +720,11 @@ namespace MeGUI
 
             try
             {
-                using (AviSynthClip a = AviSynthScriptEnvironment.ParseScript(script.ToString()))
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
                 {
+                    IntPtr clip = session.EvalScript(script.ToString());
+                    lib.ReleaseClip(clip);
                     return true;
                 }
             }
@@ -880,8 +883,11 @@ namespace MeGUI
 
             try
             {
-                using (AviSynthClip a = AviSynthScriptEnvironment.ParseScript(script.ToString()))
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
                 {
+                    IntPtr clip = session.EvalScript(script.ToString());
+                    lib.ReleaseClip(clip);
                     return true;
                 }
             }
@@ -946,8 +952,11 @@ namespace MeGUI
 
             try
             {
-                using (AviSynthClip a = AviSynthScriptEnvironment.ParseScript(script.ToString()))
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
                 {
+                    IntPtr clip = session.EvalScript(script.ToString());
+                    lib.ReleaseClip(clip);
                     return true;
                 }
             }
@@ -1087,10 +1096,20 @@ namespace MeGUI
             {
                 if (!Path.GetExtension(strAVSScript).ToLowerInvariant().Equals(".avs"))
                     return 0;
-                using (AviSynthClip a = AviSynthScriptEnvironment.OpenScriptFile(strAVSScript))
-                    if (a.HasVideo)
-                        return (double)a.raten / (double)a.rated;
-                return 0;
+                string script = string.Format("Import(\"{0}\")", strAVSScript.Replace("\\", "\\\\"));
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
+                {
+                    IntPtr clip = session.EvalScript(script);
+                    try
+                    {
+                        AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
+                        if (info.Width > 0)
+                            return (double)info.FpsNum / (double)info.FpsDen;
+                        return 0;
+                    }
+                    finally { lib.ReleaseClip(clip); }
+                }
             }
             catch
             {
@@ -1103,8 +1122,17 @@ namespace MeGUI
             try
             {
                 strErrorText = String.Empty;
-                using (AviSynthClip a = AviSynthScriptEnvironment.ParseScript(strAVSScript))
-                    return a.HasVideo;
+                using (AvsLibrary lib = AvsLibrary.Load())
+                using (AvsSession session = new AvsSession(lib))
+                {
+                    IntPtr clip = session.EvalScript(strAVSScript);
+                    try
+                    {
+                        AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
+                        return info.Width > 0 && info.Height > 0;
+                    }
+                    finally { lib.ReleaseClip(clip); }
+                }
             }
             catch (Exception ex)
             {
