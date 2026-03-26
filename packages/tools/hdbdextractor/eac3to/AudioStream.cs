@@ -143,7 +143,7 @@ namespace eac3to
 
             AudioStream audioStream = new AudioStream(s, _log);
 
-            string type = s.Substring(s.IndexOf(":") + 1, s.IndexOf(',') - s.IndexOf(":") - 1).Trim();
+            string type = s.Split(new[] { ':', ',' }, 3)[1].Trim().TrimStart('*');
             switch (type.ToUpperInvariant())
             {
                 case "AC3":
@@ -155,7 +155,9 @@ namespace eac3to
                 case "DTS-ES":
                 case "DTS EXPRESS":
                 case "DTS MASTER AUDIO":
+                case "DTS-HD MASTER AUDIO":
                 case "DTS HI-RES":
+                case "DTS-HD HI-RES":
                     audioStream.AudioType = AudioStreamType.DTS;
                     break;
                 case "EAC3":
