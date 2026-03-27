@@ -197,13 +197,7 @@
     <Content Include="lib_x64\7z.dll" Condition=" '$(Platform)' == 'x64' ">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
-    <Content Include="lib_x64\AvisynthWrapper.dll" Condition=" '$(Platform)' == 'x64' ">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Content>
     <Content Include="lib_x86\7z.dll" Condition=" '$(Platform)' == 'x86' ">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Content>
-    <Content Include="lib_x86\AvisynthWrapper.dll" Condition=" '$(Platform)' == 'x86' ">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
     <Content Include="data\ContextHelp.xml">
@@ -704,6 +698,10 @@
     <Compile Include="packages\muxer\mkvmerge\MkvMergeMuxer.cs" />
     <Compile Include="packages\muxer\mp4box\MP4BoxMuxer.cs" />
     <Compile Include="packages\muxer\tsmuxer\tsMuxeR.cs" />
+    <Compile Include="packages\reader\avs\AvsApi.cs" />
+    <Compile Include="packages\reader\avs\AvsLibrary.cs" />
+    <Compile Include="packages\reader\avs\AvsProbe.cs" />
+    <Compile Include="packages\reader\avs\AvsSession.cs" />
     <Compile Include="packages\reader\avs\AvsReader.cs">
       <SubType>Code</SubType>
     </Compile>
@@ -733,7 +731,6 @@
     <Compile Include="packages\tools\avscreator\AviSynthWindow.Designer.cs">
       <DependentUpon>AviSynthWindow.cs</DependentUpon>
     </Compile>
-    <Compile Include="packages\tools\avscreator\AvisynthWrapper.cs" />
     <Compile Include="packages\tools\avscreator\ScriptServer.cs" />
     <Compile Include="packages\tools\besplitter\AudioJoinJob.cs" />
     <Compile Include="packages\tools\besplitter\AudioSplitJob.cs" />

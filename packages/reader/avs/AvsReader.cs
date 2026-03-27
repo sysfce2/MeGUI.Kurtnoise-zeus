@@ -20,95 +20,374 @@
 
 using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
 
 using MeGUI.core.util;
 
 namespace MeGUI
 {
+    // ── Factory ───────────────────────────────────────────────────────────────
+
+    public sealed class AviSynthScriptEnvironment : IDisposable
+    {
+        public AviSynthScriptEnvironment() { }
+        public void Dispose() { }
+
+        public static AviSynthClip OpenScriptFile(string filePath)
+            => AviSynthClip.Create(isFile: true, scriptOrPath: filePath, requireRGB24: false);
+
+        public static AviSynthClip OpenScriptFile(string filePath, bool requireRGB24)
+            => AviSynthClip.Create(isFile: true, scriptOrPath: filePath, requireRGB24: requireRGB24);
+
+        public static AviSynthClip ParseScript(string script)
+            => AviSynthClip.Create(isFile: false, scriptOrPath: script, requireRGB24: false);
+
+        public static AviSynthClip ParseScript(string script, bool requireRGB24)
+            => AviSynthClip.Create(isFile: false, scriptOrPath: script, requireRGB24: requireRGB24);
+
+        // runInThread parameter kept for API compatibility — ignored in new implementation
+        public static AviSynthClip ParseScript(string script, bool requireRGB24, bool runInThread)
+            => AviSynthClip.Create(isFile: false, scriptOrPath: script, requireRGB24: requireRGB24);
+    }
+
+    // ── AviSynthClip — backed by AvsLibrary / AvsSession ─────────────────────
+
+    public sealed class AviSynthClip : IDisposable
+    {
+        private readonly AvsLibrary            _lib;
+        private readonly AvsSession            _session;
+        private readonly IntPtr                _clip;
+        private readonly AvsProbe.StreamInfo   _info;
+        private readonly AviSynthColorspace    _originalColorspace;
+        private          bool                  _disposed;
+
+        private static readonly object _locker = new object();
+
+        [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
+        private static extern void CopyMemory(IntPtr dest, IntPtr src, int count);
+
+        // ── Factory ───────────────────────────────────────────────────────────
+
+        internal static AviSynthClip Create(bool isFile, string scriptOrPath, bool requireRGB24)
+        {
+            AvsLibrary  lib     = null;
+            AvsSession  session = null;
+            IntPtr      clip    = IntPtr.Zero;
+
+            lock (_locker)
+            {
+                try
+                {
+                    lib     = AvsLibrary.Load();
+                    session = new AvsSession(lib);
+
+                    string evalScript = isFile
+                        ? string.Format("Import(\"{0}\")", scriptOrPath.Replace("\\", "\\\\"))
+                        : scriptOrPath;
+
+                    clip = session.EvalScript(evalScript);
+
+                    // Get original colorspace (raw pixel_type from VideoInfo)
+                    AviSynthColorspace origColorspace = GetColorspaceFromProbe(lib, clip);
+
+                    AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
+
+                    if (requireRGB24 && info.Width > 0)
+                    {
+                        // Apply ConvertToRGB24 for frame reading; retain the pre-conversion colorspace
+                        IntPtr rgb24Clip = TryConvertToRGB24(lib, session, clip);
+                        if (rgb24Clip != IntPtr.Zero)
+                        {
+                            lib.ReleaseClip(clip);
+                            clip = rgb24Clip;
+                            info = AvsProbe.Probe(lib, session, clip);
+                        }
+                    }
+
+                    return new AviSynthClip(lib, session, clip, info, origColorspace);
+                }
+                catch (AviSynthException)
+                {
+                    if (clip    != IntPtr.Zero) lib?.ReleaseClip(clip);
+                    session?.Dispose();
+                    lib?.Dispose();
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    if (clip    != IntPtr.Zero) lib?.ReleaseClip(clip);
+                    session?.Dispose();
+                    lib?.Dispose();
+                    throw new AviSynthException(ex.Message, ex);
+                }
+            }
+        }
+
+        private static AviSynthColorspace GetColorspaceFromProbe(AvsLibrary lib, IntPtr clip)
+        {
+            IntPtr viPtr = lib.GetVideoInfo(clip);
+            if (viPtr == IntPtr.Zero) return AviSynthColorspace.Unknown;
+            int pixelType = Marshal.ReadInt32(viPtr, 20);
+            return (AviSynthColorspace)pixelType;
+        }
+
+        private static IntPtr TryConvertToRGB24(AvsLibrary lib, AvsSession session, IntPtr clip)
+        {
+            try
+            {
+                // Build an AvsValue of type 'c' (clip) wrapping the existing clip
+                var clipArg = new AvsApi.AvsValue();
+                clipArg.type = (short)'c';
+                clipArg.p    = clip;
+
+                var result = lib.Invoke(session.Env, "ConvertToRGB24", clipArg, IntPtr.Zero);
+                session.CheckError();
+
+                if (result.type == (short)'c')
+                {
+                    IntPtr rgb24 = lib.ValAsClip(result, session.Env);
+                    lib.ReleaseValue(result);
+                    return rgb24;
+                }
+                lib.ReleaseValue(result);
+                return IntPtr.Zero;
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+        }
+
+        // ── Constructor ───────────────────────────────────────────────────────
+
+        private AviSynthClip(AvsLibrary lib, AvsSession session, IntPtr clip,
+                             AvsProbe.StreamInfo info, AviSynthColorspace originalColorspace)
+        {
+            _lib                = lib;
+            _session            = session;
+            _clip               = clip;
+            _info               = info;
+            _originalColorspace = originalColorspace;
+        }
+
+        // ── Video properties ──────────────────────────────────────────────────
+
+        public bool HasVideo  => _info.Width > 0 && _info.Height > 0;
+        public int  VideoWidth  => _info.Width;
+        public int  VideoHeight => _info.Height;
+        public int  raten       => (int)_info.FpsNum;
+        public int  rated       => (int)_info.FpsDen;
+        public int  aspectn     => 0;
+        public int  aspectd     => 1;
+        public int  interlaced_frame  => _info.IsFieldBased ? 1 : 0;
+        public int  top_field_first   => _info.IsTff ? 1 : 0;
+        public int  num_frames        => _info.NumFrames;
+
+        public AviSynthColorspace PixelType         => _originalColorspace;
+        public AviSynthColorspace OriginalColorspace => _originalColorspace;
+
+        // ── Audio properties ──────────────────────────────────────────────────
+
+        public bool             HasAudio        => _info.NumAudioSamples > 0;
+        public int              AudioSampleRate => _info.AudioSampleRate;
+        public long             SamplesCount    => _info.NumAudioSamples;
+        public AudioSampleType  SampleType      => (AudioSampleType)_info.SampleType;
+        public short            ChannelsCount   => (short)_info.AudioChannels;
+        public int              ChannelMask     => _info.ChannelMask;
+        public AudioSampleType  OriginalSampleType => (AudioSampleType)_info.SampleType;
+
+        public short BytesPerSample
+        {
+            get
+            {
+                switch (_info.SampleType)
+                {
+                    case AvsApi.SAMPLE_INT8:  return 1;
+                    case AvsApi.SAMPLE_INT16: return 2;
+                    case AvsApi.SAMPLE_INT24: return 3;
+                    case AvsApi.SAMPLE_INT32: return 4;
+                    case AvsApi.SAMPLE_FLOAT: return 4;
+                    default:                  return 2;
+                }
+            }
+        }
+
+        public short BitsPerSample    => (short)(BytesPerSample * 8);
+        public int   AvgBytesPerSec   => AudioSampleRate * ChannelsCount * BytesPerSample;
+        public long  AudioSizeInBytes => SamplesCount > 0 ? SamplesCount * ChannelsCount * BytesPerSample : 0;
+
+        // ── Methods ───────────────────────────────────────────────────────────
+
+        public int GetIntVariable(string name, int defaultValue)
+        {
+            try
+            {
+                string s = _session.EvalString("string(" + name + ")");
+                if (!string.IsNullOrEmpty(s) && int.TryParse(s, out int v))
+                    return v;
+                return defaultValue;
+            }
+            catch { return defaultValue; }
+        }
+
+        public void ReadAudio(IntPtr buf, long start, int count)
+        {
+            if (_disposed) return;
+            _lib.GetAudio(_clip, buf, start, count);
+        }
+
+        public void ReadFrame(IntPtr dst, int dstStride, int frameNum)
+        {
+            if (_disposed) return;
+
+            IntPtr frame = _lib.GetFrame(_clip, frameNum);
+            if (frame == IntPtr.Zero)
+                throw new AviSynthException(string.Format("avs_get_frame({0}) returned NULL.", frameNum));
+            try
+            {
+                if (dst != IntPtr.Zero)
+                {
+                    IntPtr src      = _lib.GetReadPtrP(frame, AvsApi.DEFAULT_PLANE);
+                    int    srcPitch = _lib.GetPitchP(frame, AvsApi.DEFAULT_PLANE);
+                    int    rowBytes = VideoWidth * 3; // RGB24: 3 bytes per pixel
+                    for (int y = 0; y < VideoHeight; y++)
+                        CopyMemory(IntPtr.Add(dst, y * dstStride),
+                                   IntPtr.Add(src, y * srcPitch),
+                                   rowBytes);
+                }
+            }
+            finally
+            {
+                _lib.ReleaseVideoFrame(frame);
+            }
+        }
+
+        // ── Static installation check ─────────────────────────────────────────
+
+        public static int CheckAvisynthInstallation(
+            out string strVersion, out bool bIsAVS26, out bool bIsAVSPlus, out bool bIsMT,
+            out string strAviSynthDLL, ref LogItem oLog)
+        {
+            strVersion    = string.Empty;
+            bIsAVS26      = false;
+            bIsAVSPlus    = false;
+            bIsMT         = false;
+            strAviSynthDLL = string.Empty;
+
+            try
+            {
+                using (AvsLibrary lib = AvsLibrary.Load())
+                {
+                    strAviSynthDLL = lib.LoadedPath;
+                    using (AvsSession session = new AvsSession(lib))
+                    {
+                        // Successfully created environment with API v9 → AviSynth+
+                        bIsAVS26   = true;
+                        bIsAVSPlus = true;
+                        bIsMT      = true;
+                        try { strVersion = session.EvalString("VersionString()"); }
+                        catch { /* version string is optional */ }
+                        return 0;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                oLog?.LogValue("Error", ex.Message, ImageType.Error, false);
+                return 1;
+            }
+        }
+
+        // ── IDisposable ───────────────────────────────────────────────────────
+
+        ~AviSynthClip() { Dispose(false); }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (_clip != IntPtr.Zero) _lib.ReleaseClip(_clip);
+            _session?.Dispose();
+            _lib?.Dispose();
+        }
+    }
+
+    // ── AvsFileFactory / AvsFile ──────────────────────────────────────────────
+
     public class AvsFileFactory : IMediaFileFactory
     {
-
         #region IMediaFileFactory Members
         public IMediaFile Open(string file)
         {
             return AvsFile.OpenScriptFile(file, true);
         }
-
         #endregion
-        #region IMediaFileFactory Members
 
+        #region IMediaFileFactory Members
         public int HandleLevel(string file)
         {
-            if (!String.IsNullOrEmpty(file) && file.ToLowerInvariant().EndsWith(".avs"))
+            if (!string.IsNullOrEmpty(file) && file.ToLowerInvariant().EndsWith(".avs"))
                 return 30;
             return -1;
         }
         #endregion
 
         #region IIDable Members
-
-        public string ID
-        {
-            get { return "AviSynth"; }
-        }
-
+        public string ID { get { return "AviSynth"; } }
         #endregion
     }
+
     public sealed class AvsFile : IMediaFile
     {
         private AviSynthClip clip = null;
         private IAudioReader audioReader;
         private IVideoReader videoReader;
         private VideoInformation info;
+
         #region construction
-        public AviSynthClip Clip
-        {
-            get
-            {
-                return this.clip;
-            }
-        }
+
+        public AviSynthClip Clip { get { return this.clip; } }
 
         public static AvsFile OpenScriptFile(string fileName)
-        {
-            return new AvsFile(fileName, false, false);
-        }
+            => new AvsFile(fileName, false, false);
 
         public static AvsFile ParseScript(string scriptBody)
-        {
-            return new AvsFile(scriptBody, true, false);
-        }
+            => new AvsFile(scriptBody, true, false);
 
         public static AvsFile OpenScriptFile(string fileName, bool bRequireRGB24)
-        {
-            return new AvsFile(fileName, false, bRequireRGB24);
-        }
+            => new AvsFile(fileName, false, bRequireRGB24);
 
         public static AvsFile ParseScript(string scriptBody, bool bRequireRGB24)
-        {
-            return new AvsFile(scriptBody, true, bRequireRGB24);
-        }
+            => new AvsFile(scriptBody, true, bRequireRGB24);
 
         private AvsFile(string script, bool parse, bool bRequireRGB24)
         {
             try
             {
-                this.clip = parse ? AviSynthScriptEnvironment.ParseScript(script, bRequireRGB24) : AviSynthScriptEnvironment.OpenScriptFile(script, bRequireRGB24);
+                this.clip = parse
+                    ? AviSynthScriptEnvironment.ParseScript(script, bRequireRGB24)
+                    : AviSynthScriptEnvironment.OpenScriptFile(script, bRequireRGB24);
 
                 checked
                 {
                     if (clip.HasVideo)
                     {
-                        ulong width = (ulong)clip.VideoWidth;
+                        ulong width  = (ulong)clip.VideoWidth;
                         ulong height = (ulong)clip.VideoHeight;
                         info = new VideoInformation(
                             clip.HasVideo, width, height,
                             new Dar(clip.GetIntVariable("MeGUI_darx", -1),
-                                  clip.GetIntVariable("MeGUI_dary", -1),
-                                  width, height),
-                                  (ulong)clip.num_frames,
-                                  ((double)clip.raten) / ((double)clip.rated),
-                                  clip.raten, clip.rated);
+                                    clip.GetIntVariable("MeGUI_dary", -1),
+                                    width, height),
+                            (ulong)clip.num_frames,
+                            ((double)clip.raten) / ((double)clip.rated),
+                            clip.raten, clip.rated);
                     }
                     else if (clip.HasAudio)
                         info = new VideoInformation(false, 0, 0, Dar.A1x1, (ulong)clip.SamplesCount, (double)clip.AudioSampleRate, 0, 0);
@@ -133,21 +412,15 @@ namespace MeGUI
             GC.SuppressFinalize(this);
         }
         #endregion
+
         #region properties
-        public VideoInformation VideoInfo
-        {
-            get { return info; }
-        }
-        public bool CanReadVideo
-        {
-            get { return true; }
-        }
-        public bool CanReadAudio
-        {
-            get { return true; }
-        }
+        public VideoInformation VideoInfo   { get { return info; } }
+        public bool             CanReadVideo  { get { return true; } }
+        public bool             CanReadAudio  { get { return true; } }
         #endregion
-        private static object _locker = new object();
+
+        private static readonly object _locker = new object();
+
         public IAudioReader GetAudioReader(int track)
         {
             if (track != 0 || !clip.HasAudio)
@@ -160,6 +433,7 @@ namespace MeGUI
                 }
             return audioReader;
         }
+
         public IVideoReader GetVideoReader()
         {
             if (!this.VideoInfo.HasVideo)
@@ -173,42 +447,36 @@ namespace MeGUI
             return videoReader;
         }
 
+        // ── Inner readers ─────────────────────────────────────────────────────
+
         sealed class AvsVideoReader : IVideoReader
         {
+            private AviSynthClip clip;
+            private int width, height;
+
             public AvsVideoReader(AviSynthClip clip, int width, int height)
             {
-                this.clip = clip;
-                this.width = width;
+                this.clip   = clip;
+                this.width  = width;
                 this.height = height;
             }
-            private AviSynthClip clip = null;
-            int width, height;
 
-            public int FrameCount
-            {
-                get { return this.clip.num_frames;}
-            }
+            public int FrameCount { get { return this.clip.num_frames; } }
 
             public Bitmap ReadFrameBitmap(int position)
             {
                 Bitmap bmp = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
                 try
                 {
-                    // Lock the bitmap's bits.  
-                    Rectangle rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
+                    Rectangle rect    = new Rectangle(0, 0, bmp.Width, bmp.Height);
                     System.Drawing.Imaging.BitmapData bmpData =
-                        bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadWrite,
-                        bmp.PixelFormat);
+                        bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadWrite, bmp.PixelFormat);
                     try
                     {
-                        // Get the address of the first line.
-                        IntPtr ptr = bmpData.Scan0;
-                        // Read data
-                        clip.ReadFrame(ptr, bmpData.Stride, position);
+                        clip.ReadFrame(bmpData.Scan0, bmpData.Stride, position);
                     }
                     finally
                     {
-                        // Unlock the bits.
                         bmp.UnlockBits(bmpData);
                     }
                     bmp.RotateFlip(RotateFlipType.Rotate180FlipX);
@@ -217,49 +485,37 @@ namespace MeGUI
                 catch (System.Runtime.InteropServices.SEHException ex)
                 {
                     bmp.Dispose();
-
-                    MeGUI.core.util.LogItem _oLog = MainForm.Instance.AVSScriptCreatorLog;
-                    if (_oLog == null)
-                    {
-                        _oLog = MainForm.Instance.Log.Info("AVS Script Creator");
-                        MainForm.Instance.AVSScriptCreatorLog = _oLog;
-                    }
-                    _oLog.LogValue("Could not read frame", ex.Message, MeGUI.core.util.ImageType.Warning, true);
-
+                    LogFrameError(ex.Message);
                     throw;
                 }
                 catch (Exception ex)
                 {
                     bmp.Dispose();
-
-                    MeGUI.core.util.LogItem _oLog = MainForm.Instance.AVSScriptCreatorLog;
-                    if (_oLog == null)
-                    {
-                        _oLog = MainForm.Instance.Log.Info("AVS Script Creator");
-                        MainForm.Instance.AVSScriptCreatorLog = _oLog;
-                    }
-                    _oLog.LogValue("Could not read frame", ex.Message, MeGUI.core.util.ImageType.Warning, true);
-
+                    LogFrameError(ex.Message);
                     throw;
                 }
             }
+
+            private static void LogFrameError(string message)
+            {
+                LogItem log = MainForm.Instance.AVSScriptCreatorLog;
+                if (log == null)
+                {
+                    log = MainForm.Instance.Log.Info("AVS Script Creator");
+                    MainForm.Instance.AVSScriptCreatorLog = log;
+                }
+                log.LogValue("Could not read frame", message, ImageType.Warning, true);
+            }
         }
+
         sealed class AvsAudioReader : IAudioReader
         {
-            public AvsAudioReader(AviSynthClip clip)
-            {
-                this.clip = clip;
-            }
             private AviSynthClip clip;
-            public long SampleCount
-            {
-                get { return clip.SamplesCount; }
-            }
 
-            public bool SupportsFastReading
-            {
-                get { return true; }
-            }
+            public AvsAudioReader(AviSynthClip clip) { this.clip = clip; }
+
+            public long SampleCount           { get { return clip.SamplesCount; } }
+            public bool SupportsFastReading   { get { return true; } }
 
             public long ReadAudioSamples(long nStart, int nAmount, IntPtr buf)
             {
@@ -267,18 +523,11 @@ namespace MeGUI
                 return nAmount;
             }
 
-            public byte[] ReadAudioSamples(long nStart, int nAmount)
-            {
-                return null;
-            }
+            public byte[] ReadAudioSamples(long nStart, int nAmount) { return null; }
         }
+
         #region IDisposable Members
-
-        public void Dispose()
-        {
-            Cleanup();
-        }
-
+        public void Dispose() { Cleanup(); }
         #endregion
     }
 }
