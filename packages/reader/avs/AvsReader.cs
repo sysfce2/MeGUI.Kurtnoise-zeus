@@ -23,6 +23,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 
 using MeGUI.core.util;
+using MeGUI.core.plugins.interfaces;
 
 namespace MeGUI
 {
@@ -58,8 +59,10 @@ namespace MeGUI
         private readonly AvsSession            _session;
         private readonly IntPtr                _clip;
         private readonly AvsProbe.StreamInfo   _info;
+        private readonly AvsProbe.StreamInfo   _originalInfo;
         private readonly AviSynthColorspace    _originalColorspace;
         private          bool                  _disposed;
+        private readonly string                _convertError;
 
         private static readonly object _locker = new object();
 
@@ -92,10 +95,14 @@ namespace MeGUI
 
                     AvsProbe.StreamInfo info = AvsProbe.Probe(lib, session, clip);
 
+                    // Keep the original probe result before any conversion
+                    AvsProbe.StreamInfo originalInfo = info;
+
+                    string convertError = null;
                     if (requireRGB24 && info.Width > 0)
                     {
                         // Apply ConvertToRGB24 for frame reading; retain the pre-conversion colorspace
-                        IntPtr rgb24Clip = TryConvertToRGB24(lib, session, clip);
+                        IntPtr rgb24Clip = TryConvertToRGB24(lib, session, clip, evalScript, out convertError);
                         if (rgb24Clip != IntPtr.Zero)
                         {
                             lib.ReleaseClip(clip);
@@ -104,7 +111,7 @@ namespace MeGUI
                         }
                     }
 
-                    return new AviSynthClip(lib, session, clip, info, origColorspace);
+                    return new AviSynthClip(lib, session, clip, info, originalInfo, origColorspace, convertError);
                 }
                 catch (AviSynthException)
                 {
@@ -130,30 +137,23 @@ namespace MeGUI
             int pixelType = Marshal.ReadInt32(viPtr, 20);
             return (AviSynthColorspace)pixelType;
         }
-
-        private static IntPtr TryConvertToRGB24(AvsLibrary lib, AvsSession session, IntPtr clip)
+        private static IntPtr TryConvertToRGB24(AvsLibrary lib, AvsSession session, IntPtr clip,
+                                                string evalScript, out string error)
         {
+            error = null;
             try
             {
-                // Build an AvsValue of type 'c' (clip) wrapping the existing clip
-                var clipArg = new AvsApi.AvsValue();
-                clipArg.type = (short)'c';
-                clipArg.p    = clip;
-
-                var result = lib.Invoke(session.Env, "ConvertToRGB24", clipArg, IntPtr.Zero);
-                session.CheckError();
-
-                if (result.type == (short)'c')
-                {
-                    IntPtr rgb24 = lib.ValAsClip(result, session.Env);
-                    lib.ReleaseValue(result);
-                    return rgb24;
-                }
-                lib.ReleaseValue(result);
-                return IntPtr.Zero;
+                // Re-evaluate the original script with ConvertToRGB24() appended.
+                // We cannot rely on AviSynth's implicit 'last' variable because it
+                // does not persist across separate avs_invoke("Eval", ...) calls.
+                // Any expensive source indexing (e.g. LWI) is cached from the first
+                // evaluation and will not be repeated.
+                string rgb24Script = evalScript + "\nConvertToRGB24()";
+                return session.EvalScript(rgb24Script);
             }
-            catch
+            catch (Exception ex)
             {
+                error = ex.Message;
                 return IntPtr.Zero;
             }
         }
@@ -161,13 +161,16 @@ namespace MeGUI
         // ── Constructor ───────────────────────────────────────────────────────
 
         private AviSynthClip(AvsLibrary lib, AvsSession session, IntPtr clip,
-                             AvsProbe.StreamInfo info, AviSynthColorspace originalColorspace)
+                             AvsProbe.StreamInfo info, AvsProbe.StreamInfo originalInfo,
+                             AviSynthColorspace originalColorspace, string convertError)
         {
             _lib                = lib;
             _session            = session;
             _clip               = clip;
             _info               = info;
+            _originalInfo       = originalInfo;
             _originalColorspace = originalColorspace;
+            _convertError       = convertError;
         }
 
         // ── Video properties ──────────────────────────────────────────────────
@@ -289,6 +292,41 @@ namespace MeGUI
             {
                 _lib.ReleaseVideoFrame(frame);
             }
+        }
+
+        /// <summary>
+        /// Returns a multi-line debug string with all stream information for OSD overlay.
+        /// Shows original (pre-conversion) probe data alongside the current (post-conversion) data.
+        /// </summary>
+        public string GetDebugOverlayText()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendFormat("=== ORIGINAL (pre-conversion) ===\n");
+            sb.AppendFormat("Colorspace enum : {0} (0x{1:X8})\n", _originalColorspace, (int)_originalColorspace);
+            sb.AppendFormat("ColorSpace probe: {0}\n", _originalInfo.ColorSpace);
+            sb.AppendFormat("Resolution      : {0}x{1}\n", _originalInfo.Width, _originalInfo.Height);
+            sb.AppendFormat("BitDepth        : {0}\n", _originalInfo.BitDepth);
+            sb.AppendFormat("FullRange       : {0}\n", _originalInfo.FullRange);
+            sb.AppendFormat("FPS             : {0}/{1}\n", _originalInfo.FpsNum, _originalInfo.FpsDen);
+            sb.AppendFormat("Frames          : {0}\n", _originalInfo.NumFrames);
+            sb.AppendFormat("ImageType       : 0x{0:X8}\n", _originalInfo.ImageType);
+            sb.AppendFormat("FieldBased      : {0}  BFF: {1}  TFF: {2}\n",
+                _originalInfo.IsFieldBased, _originalInfo.IsBff, _originalInfo.IsTff);
+            sb.AppendFormat("Audio           : {0}Hz  {1}ch  {2} samples\n",
+                _originalInfo.AudioSampleRate, _originalInfo.AudioChannels, _originalInfo.NumAudioSamples);
+            sb.AppendFormat("SampleType      : 0x{0:X8}\n", _originalInfo.SampleType);
+            sb.AppendFormat("ChannelMask     : 0x{0:X8}\n", _originalInfo.ChannelMask);
+            sb.AppendFormat("\n=== CURRENT (post-conversion) ===\n");
+            sb.AppendFormat("ColorSpace probe: {0}\n", _info.ColorSpace);
+            sb.AppendFormat("Resolution      : {0}x{1}\n", _info.Width, _info.Height);
+            sb.AppendFormat("BitDepth        : {0}\n", _info.BitDepth);
+            sb.AppendFormat("FullRange       : {0}\n", _info.FullRange);
+            sb.AppendFormat("RGB24 active    : {0}\n", !ReferenceEquals(_info, _originalInfo));
+            if (_convertError != null)
+            {
+                sb.AppendFormat("\n=== CONVERT ERROR ===\n{0}\n", _convertError);
+            }
+            return sb.ToString();
         }
 
         // ── Static installation check ─────────────────────────────────────────
@@ -509,6 +547,31 @@ namespace MeGUI
                         bmp.UnlockBits(bmpData);
                     }
                     bmp.RotateFlip(RotateFlipType.Rotate180FlipX);
+
+                    // ── Debug OSD overlay (opt-in via Settings) ───────────
+/*                    if (MainForm.Instance.Settings.DebugVideoOSD)
+                    { */
+                        try
+                        {
+                          /*  string osdText = clip.GetDebugOverlayText();
+                            using (Graphics g = Graphics.FromImage(bmp))
+                            {
+                                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                                using (Font font = new Font("Consolas", 10f, FontStyle.Bold))
+                                {
+                                    SizeF textSize = g.MeasureString(osdText, font);
+                                    using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(180, 0, 0, 0)))
+                                    {
+                                        g.FillRectangle(bgBrush, 0, 0, textSize.Width + 12, textSize.Height + 8);
+                                    }
+                                    g.DrawString(osdText, font, Brushes.Black, 7, 5);
+                                    g.DrawString(osdText, font, Brushes.Lime, 6, 4);
+                                }
+                            }*/
+                        } 
+                        catch { /* OSD failure must not break preview */ }
+                    //}
+                    
                     return bmp;
                 }
                 catch (System.Runtime.InteropServices.SEHException ex)
