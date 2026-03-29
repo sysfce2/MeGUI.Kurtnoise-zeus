@@ -119,7 +119,7 @@ namespace MeGUI
 #if CSC
 			name = "";
 #endif
-            DateTime BuildDate = new DateTime(2026,01,03);
+            DateTime BuildDate = new DateTime(2026,03,29);
             string[] resources = myAssembly.GetManifestResourceNames();
             this.trayIcon.Icon = new Icon(myAssembly.GetManifestResourceStream(name + "App.ico"));
             this.Icon = trayIcon.Icon;
@@ -1316,7 +1316,7 @@ namespace MeGUI
         {
             bool bDebug = false;
             string AppProductVersion = "";
-            DateTime BuildDate = new DateTime(2026, 01, 03);
+            DateTime BuildDate = new DateTime(2026, 03, 29);
 #if DEBUG
             bDebug = true;
 #endif

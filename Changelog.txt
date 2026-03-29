@@ -1,3 +1,16 @@
+Changelog version 6666 20260329
+
+- Major rewrite on Avisynth Script handles - No more AvisynthWrapper.dll required
+- Improved Audio Encoder Interface - alignment with AVS+'s internal audio-cache granularity, reducing ReadAudio calls by ~12× vs 4096
+- Fixed eac3to 3.55 DTS-HD stream parsing and simplify type extraction - Patch by Thommy74
+- Fixed eac3to 3.55 stream parsing for new language and default-track format - Patch by Thommy74
+- Updated manifest file in order to support UTF-8 input filename
+- Enabled cuda & quick sync hardware acceleration decoding for LSMASHVideoSource & BSvideoSource
+- Added D3D12 Video Hardware Acceleration Support - mainly for BSVideoSource
+- Fixed issues #44 #53 #57 #58 #61 
+- Updated MediaInfo Libraries. 
+
+
 Changelog version 6666 20251116
 
 - Added esc keyboard shortcut to close the main UI Forms.
