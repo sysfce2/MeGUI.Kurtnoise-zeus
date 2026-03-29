@@ -81,6 +81,8 @@ namespace MeGUI.core.gui
         private ProgressWindow pw;
         private MainForm mainForm;
         private LogItem log;
+        private int _isShutDown; // 0 = running, 1 = shut down; used with Interlocked for atomic shutdown guard
+        private bool isShutDown => _isShutDown != 0;
 
         public event EventHandler WorkerFinishedJobs;
 
@@ -99,8 +101,8 @@ namespace MeGUI.core.gui
             if (disposing)
             {
                 // dispose managed resources
-                pw.Dispose();
-                currentProcessor.Dispose();
+                pw?.Dispose();
+                currentProcessor?.Dispose();
             }
             // free native resources
         }
@@ -114,13 +116,13 @@ namespace MeGUI.core.gui
         #region process window opening and closing
         public void HideProcessWindow()
         {
-            if (pw != null)
+            if (pw != null && !isShutDown && MainForm.Instance != null)
                 MainForm.Instance.Jobs.ShowProgressWindow(pw, false);
         }
 
         public void ShowProcessWindow()
         {
-            if (pw != null)
+            if (pw != null && !isShutDown && MainForm.Instance != null)
                 MainForm.Instance.Jobs.ShowProgressWindow(pw, true);
         }
 
@@ -324,6 +326,10 @@ namespace MeGUI.core.gui
         #region shut down
         internal void ShutDown()
         {
+            // Atomically check-and-set to prevent double-entry from concurrent threads
+            if (Interlocked.CompareExchange(ref _isShutDown, 1, 0) != 0)
+                return;
+
             if (IsRunning)
                 Abort();
 
@@ -434,6 +440,9 @@ namespace MeGUI.core.gui
             Thread t = new Thread(new ThreadStart(delegate
             {
                 TaggedJob job = mainForm.Jobs.ByName(su.JobName);
+                if (job == null)
+                    return;
+
                 JobStartInfo JobInfo = JobStartInfo.JOB_STARTED;
 
                 copyInfoIntoJob(job, su);
@@ -475,7 +484,8 @@ namespace MeGUI.core.gui
                     status = JobWorkerStatus.Stopped;
                     JobInfo = JobStartInfo.COULDNT_START;
                 }
-                else if (mainForm.Jobs.WorkersCount <= MainForm.Instance.Settings.WorkerMaximumCount || bIsTemporaryWorker)
+                else if (MainForm.Instance != null &&
+                    (mainForm.Jobs.WorkersCount <= MainForm.Instance.Settings.WorkerMaximumCount || bIsTemporaryWorker))
                 {
                     JobInfo = StartNextJobInQueue();
                     switch (JobInfo)
@@ -490,12 +500,18 @@ namespace MeGUI.core.gui
                                 status = JobWorkerStatus.Idle;
                             if (mode == JobWorkerMode.CloseOnLocalListCompleted)
                                 ShutDown();
-                            WorkerFinishedJobs(this, EventArgs.Empty);
+                            WorkerFinishedJobs?.Invoke(this, EventArgs.Empty);
                             break;
                     }
                 }
                 else
                     status = JobWorkerStatus.Idle;
+
+                // Guard: after shutdown the worker has been removed from the
+                // workers dictionary and its resources may be disposed, so skip
+                // any further calls that reference mainForm.Jobs or the worker.
+                if (isShutDown)
+                    return;
 
                 mainForm.Jobs.AdjustWorkerCount(true);
 

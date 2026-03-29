@@ -102,7 +102,24 @@ namespace MeGUI.core.details
         /// <param name="bShow">true if to be shown, false if not</param>
         public void ShowProgressWindow(ProgressWindow oProgress, bool bShow)
         {
-            this.Invoke((System.Action)delegate { oProgress.Visible = bShow; });
+            // Early-out if the control is already disposed or has no handle.
+            // Note: a TOCTOU race exists between this check and the Invoke below,
+            // so the try/catch is required as a secondary safety net.
+            if (IsDisposed || !IsHandleCreated)
+                return;
+
+            try
+            {
+                this.Invoke((System.Action)delegate { oProgress.Visible = bShow; });
+            }
+            catch (ObjectDisposedException)
+            {
+                // Control was disposed between our check and the Invoke call
+            }
+            catch (InvalidOperationException)
+            {
+                // Handle was destroyed between our check and the Invoke call
+            }
         }
 
         /// <summary>
