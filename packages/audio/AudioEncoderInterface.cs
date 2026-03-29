@@ -47,7 +47,8 @@ namespace MeGUI
         {
             NONE = 0,
             WAV = 1,
-            W64 = 2
+            W64 = 2,
+            RF64 = 3    // ← add: > 4 GB WAV-compatible container
         }
         private static IJobProcessor init(MainForm mf, Job j)
         {
@@ -282,6 +283,20 @@ namespace MeGUI
             return strLayout;
         }
 
+        /// <summary>
+        /// Resolves the effective WAVEFORMATEXTENSIBLE channel mask.
+        /// Returns -1  → skip EXTENSIBLE extension entirely (plain WAV / W64 / RF64).
+        /// Returns  0  → EXTENSIBLE wanted; WriteHeader picks the per-channel default.
+        /// Returns >0  → use this specific mask verbatim.
+        /// </summary>
+        private static int ResolveChannelMask(int clipMask)
+        {
+            // AviSynthClip already extracts the mask from image_type; we just
+            // guard against an explicit opt-out (-1) vs "not set" (0).
+            if (clipMask < 0) return -1;
+            return clipMask;   // 0 = auto-default, >0 = verbatim
+        }
+
         private bool bShowError = false;
         private void RaiseEvent()
         {
@@ -469,18 +484,23 @@ namespace MeGUI
                         inputLog.LogValue("Sample rate", a.AudioSampleRate);
                         inputLog.LogValue("Channel Mask", a.ChannelMask);
                         inputLog.LogValue("Channel Layout", GetChannelLayoutFromMask(a.ChannelMask));
-                        
-                        const int MAX_SAMPLES_PER_ONCE = 4096;
-                        int frameSample = 0;
-                        int frameBufferTotalSize = MAX_SAMPLES_PER_ONCE * a.ChannelsCount * a.BytesPerSample;
+
+                        // ── Choose chunk size: 1 second of audio, capped at 64 MB ────────────
+                        // aligns with AVS+'s internal audio-cache granularity, reducing ReadAudio calls by ~12× vs 4096.
+                        int samplesPerChunk = Math.Min(
+                            a.AudioSampleRate,
+                            (int)Math.Min(a.SamplesCount, 67_108_864L / (a.BytesPerSample * a.ChannelsCount)));
+                        int frameBufferTotalSize = samplesPerChunk * a.ChannelsCount * a.BytesPerSample;
+
                         byte[] frameBuffer = new byte[frameBufferTotalSize];
+                        int frameSample = 0;
+
                         CreateEncoderProcess(a);
                         try
                         {
                             using (Stream target = _encoderProcess.StandardInput.BaseStream)
                             {
-                                // let's write WAV Header
-                                WriteHeader(target, a, _sendWavHeaderToEncoderStdIn, a.ChannelMask);
+                                WriteHeader(target, a, _sendWavHeaderToEncoderStdIn, ResolveChannelMask(a.ChannelMask));
                                 _sampleRate = a.AudioSampleRate;
                                 GCHandle h = GCHandle.Alloc(frameBuffer, GCHandleType.Pinned);
                                 IntPtr address = h.AddrOfPinnedObject();
@@ -491,32 +511,21 @@ namespace MeGUI
                                     _oLastUpdate.Restart();
                                     while (frameSample < a.SamplesCount)
                                     {
-                                        su.ClipLength = TimeSpan.FromSeconds((double)a.SamplesCount / (double)_sampleRate);
-                                        while (frameSample < a.SamplesCount)
+                                        _mre.WaitOne();
+                                        if (_encoderProcess != null && _encoderProcess.HasExited)
                                         {
-                                            _mre.WaitOne();
-
-                                            if (_encoderProcess != null)
-                                            {
-                                                if (_encoderProcess.HasExited)
-                                                {
-                                                    string strError = WindowUtil.GetErrorText(_encoderProcess.ExitCode);
-                                                    throw new ApplicationException("Abnormal encoder termination. Exit code: " + strError);
-                                                }
-
-                                            }
-                                            int nHowMany = Math.Min((int)(a.SamplesCount - frameSample), MAX_SAMPLES_PER_ONCE);
-
-                                            a.ReadAudio(address, frameSample, nHowMany);
-
-                                            target.Write(frameBuffer, 0, nHowMany * a.ChannelsCount * a.BytesPerSample);
-                                            target.Flush();
-                                            frameSample += nHowMany;
-                                            if (_oLastUpdate.Elapsed.TotalSeconds > 1)
-                                            {
-                                                SetProgress((decimal)frameSample / (decimal)a.SamplesCount);
-                                                _oLastUpdate.Restart();
-                                            }
+                                            string strError = WindowUtil.GetErrorText(_encoderProcess.ExitCode);
+                                            throw new ApplicationException("Abnormal encoder termination. Exit code: " + strError);
+                                        }
+                                        int nHowMany = Math.Min((int)(a.SamplesCount - frameSample), samplesPerChunk);
+                                        a.ReadAudio(address, frameSample, nHowMany);
+                                        target.Write(frameBuffer, 0, nHowMany * a.ChannelsCount * a.BytesPerSample);
+                                        target.Flush();
+                                        frameSample += nHowMany;
+                                        if (_oLastUpdate.Elapsed.TotalSeconds > 1)
+                                        {
+                                            SetProgress((decimal)frameSample / (decimal)a.SamplesCount);
+                                            _oLastUpdate.Restart();
                                         }
                                     }
                                 }
@@ -524,7 +533,7 @@ namespace MeGUI
                                 {
                                     h.Free();
                                 }
-                                
+
                                 SetProgress(1M);
                                 if (_sendWavHeaderToEncoderStdIn != HeaderType.NONE && a.BytesPerSample % 2 == 1)
                                     target.WriteByte(0);
@@ -666,8 +675,6 @@ namespace MeGUI
 
         private static void WriteHeader(Stream target, AviSynthClip a, HeaderType headerType, int iChannelMask)
         {
-            // https://github.com/jones1913/BeHappy
-
             if (headerType == HeaderType.NONE)
                 return;
 
@@ -677,74 +684,109 @@ namespace MeGUI
             uint HeaderSize = (uint)(WExtHeader ? 60 : 36);
             int[] defmask = { 0, 4, 3, 7, 51, 55, 63, 319, 1599, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-            if (Greater4GB && headerType == HeaderType.W64)
+            switch (headerType)
             {
-                // W64
-                HeaderSize = (uint)(WExtHeader ? 128 : 112);
-                target.Write(System.Text.Encoding.ASCII.GetBytes("riff"), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x11CF912E), 0, 4);  // GUID
-                target.Write(BitConverter.GetBytes((uint)0xDB28D6A5), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x0000C104), 0, 4);
-                target.Write(BitConverter.GetBytes((a.AudioSizeInBytes + HeaderSize)), 0, 8);
-                target.Write(System.Text.Encoding.ASCII.GetBytes("wave"), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x11D3ACF3), 0, 4);  // GUID
-                target.Write(BitConverter.GetBytes((uint)0xC000D18C), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x8ADB8E4F), 0, 4);
-                target.Write(System.Text.Encoding.ASCII.GetBytes("fmt "), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x11D3ACF3), 0, 4);  // GUID
-                target.Write(BitConverter.GetBytes((uint)0xC000D18C), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x8ADB8E4F), 0, 4);
-                target.Write(BitConverter.GetBytes(WExtHeader ? (ulong)64 : (ulong)48), 0, 8);
+                // ── W64 ────────────────────────────────────────────────────────
+                case HeaderType.W64:
+                    {
+                        HeaderSize = (uint)(WExtHeader ? 128 : 112);
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("riff"), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0x11CF912E), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0xDB28D6A5), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0x0000C104), 0, 4);
+                        target.Write(BitConverter.GetBytes(a.AudioSizeInBytes + HeaderSize), 0, 8);
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("wave"), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0x11D3ACF3), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0xC000D18C), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0x8ADB8E4F), 0, 4);
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("fmt "), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0x11D3ACF3), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0xC000D18C), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0x8ADB8E4F), 0, 4);
+                        target.Write(BitConverter.GetBytes(WExtHeader ? (ulong)64 : (ulong)48), 0, 8);
+                        break;
+                    }
+
+                // ── RF64 ───────────────────────────────────────────────────────
+                case HeaderType.RF64:
+                    {
+                        ulong fmtSize = WExtHeader ? 40u : 16u;
+                        ulong chunkTotal = (ulong)a.AudioSizeInBytes + 36u + fmtSize + 36u; // +36 for ds64
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("RF64"), 0, 4);
+                        target.Write(BitConverter.GetBytes(0xFFFFFFFF), 0, 4);             // placeholder RIFF size
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"), 0, 4);
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("ds64"), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)28), 0, 4);               // ds64 chunk size
+                        target.Write(BitConverter.GetBytes((long)chunkTotal), 0, 8);       // RIFF size
+                        target.Write(BitConverter.GetBytes(a.AudioSizeInBytes), 0, 8);     // data chunk size
+                        target.Write(BitConverter.GetBytes((long)a.SamplesCount), 0, 8);   // sample count
+                        target.Write(BitConverter.GetBytes((uint)0), 0, 4);                // table length
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("fmt "), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)fmtSize), 0, 4);
+                        break;
+                    }
+
+                // ── WAV (default) ──────────────────────────────────────────────
+                default:
+                    {
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"), 0, 4);
+                        target.Write(BitConverter.GetBytes(Greater4GB
+                            ? (FAAD_MAGIC_VALUE + HeaderSize)
+                            : (uint)(a.AudioSizeInBytes + HeaderSize)), 0, 4);
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"), 0, 4);
+                        target.Write(System.Text.Encoding.ASCII.GetBytes("fmt "), 0, 4);
+                        target.Write(BitConverter.GetBytes(WExtHeader ? (uint)40 : (uint)16), 0, 4);
+                        break;
+                    }
             }
-            else
-            {
-                //WAV
-                target.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"), 0, 4);
-                target.Write(BitConverter.GetBytes(Greater4GB ? (FAAD_MAGIC_VALUE + HeaderSize) : (uint)(a.AudioSizeInBytes + HeaderSize)), 0, 4);
-                target.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"), 0, 4);
-                target.Write(System.Text.Encoding.ASCII.GetBytes("fmt "), 0, 4);
-                target.Write(BitConverter.GetBytes(WExtHeader ? (uint)40 : (uint)16), 0, 4);
-            }
-            // fmt chunk common
-            target.Write(BitConverter.GetBytes(WExtHeader ? (uint)0xFFFE : (uint)((a.SampleType == AudioSampleType.FLOAT) ? 3 : 1)), 0, 2);
+
+            // ── fmt chunk (common) ────────────────────────────────────────────
+            target.Write(BitConverter.GetBytes(WExtHeader ? (ushort)0xFFFE : (ushort)((a.SampleType == AudioSampleType.FLOAT) ? 3 : 1)), 0, 2);
             target.Write(BitConverter.GetBytes(a.ChannelsCount), 0, 2);
             target.Write(BitConverter.GetBytes(a.AudioSampleRate), 0, 4);
             target.Write(BitConverter.GetBytes(a.BitsPerSample * a.AudioSampleRate * a.ChannelsCount / 8), 0, 4);
             target.Write(BitConverter.GetBytes(a.ChannelsCount * a.BitsPerSample / 8), 0, 2);
             target.Write(BitConverter.GetBytes(a.BitsPerSample), 0, 2);
-            // if WAVE_FORMAT_EXTENSIBLE continue fmt chunk
+
+            // ── WAVE_FORMAT_EXTENSIBLE extension ──────────────────────────────
             if (WExtHeader)
             {
                 if (iChannelMask == 0)
                     iChannelMask = defmask[a.ChannelsCount];
-                target.Write(BitConverter.GetBytes((uint)0x16), 0, 2);
+                target.Write(BitConverter.GetBytes((ushort)0x16), 0, 2);
                 target.Write(BitConverter.GetBytes(a.BitsPerSample), 0, 2);
                 target.Write(BitConverter.GetBytes(iChannelMask), 0, 4);
-                target.Write(BitConverter.GetBytes(((a.SampleType == AudioSampleType.FLOAT) ? 3 : 1)), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x00100000), 0, 4); // GUID
+                target.Write(BitConverter.GetBytes((a.SampleType == AudioSampleType.FLOAT) ? 3 : 1), 0, 4);
+                target.Write(BitConverter.GetBytes((uint)0x00100000), 0, 4);
                 target.Write(BitConverter.GetBytes((uint)0xAA000080), 0, 4);
                 target.Write(BitConverter.GetBytes((uint)0x719B3800), 0, 4);
             }
-            // data chunk
-            if (Greater4GB && headerType == HeaderType.W64)
+
+            // ── data chunk ────────────────────────────────────────────────────
+            switch (headerType)
             {
-                // W64
-                if (!WExtHeader)
-                {
-                    target.Write(BitConverter.GetBytes((uint)0x0000D000), 0, 4); // pad
-                    target.Write(BitConverter.GetBytes((uint)0x0000D000), 0, 4);
-                }
-                target.Write(System.Text.Encoding.ASCII.GetBytes("data"), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x11D3ACF3), 0, 4);  // GUID
-                target.Write(BitConverter.GetBytes((uint)0xC000D18C), 0, 4);
-                target.Write(BitConverter.GetBytes((uint)0x8ADB8E4F), 0, 4);
-                target.Write(BitConverter.GetBytes(a.AudioSizeInBytes + 24), 0, 8);
-            }
-            else
-            {
-                // WAV
-                target.Write(System.Text.Encoding.ASCII.GetBytes("data"), 0, 4);
-                target.Write(BitConverter.GetBytes(Greater4GB ? FAAD_MAGIC_VALUE : (uint)a.AudioSizeInBytes), 0, 4);
+                case HeaderType.W64:
+                    if (!WExtHeader) // 8-byte pad to align fmt payload
+                    {
+                        target.Write(BitConverter.GetBytes((uint)0x0000D000), 0, 4);
+                        target.Write(BitConverter.GetBytes((uint)0x0000D000), 0, 4);
+                    }
+                    target.Write(System.Text.Encoding.ASCII.GetBytes("data"), 0, 4);
+                    target.Write(BitConverter.GetBytes((uint)0x11D3ACF3), 0, 4);
+                    target.Write(BitConverter.GetBytes((uint)0xC000D18C), 0, 4);
+                    target.Write(BitConverter.GetBytes((uint)0x8ADB8E4F), 0, 4);
+                    target.Write(BitConverter.GetBytes(a.AudioSizeInBytes + 24), 0, 8);
+                    break;
+
+                case HeaderType.RF64:
+                    target.Write(System.Text.Encoding.ASCII.GetBytes("data"), 0, 4);
+                    target.Write(BitConverter.GetBytes(0xFFFFFFFF), 0, 4);   // placeholder size
+                    break;
+
+                default: // WAV
+                    target.Write(System.Text.Encoding.ASCII.GetBytes("data"), 0, 4);
+                    target.Write(BitConverter.GetBytes(Greater4GB ? FAAD_MAGIC_VALUE : (uint)a.AudioSizeInBytes), 0, 4);
+                    break;
             }
         }
 
