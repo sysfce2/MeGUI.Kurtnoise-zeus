@@ -19,6 +19,7 @@ Just open the MeGUI.sln file using Visual Studio and restaure NuGet missing pack
 Nothing really new comparing to the official release except :
 
 - Audio transcoding in order to use channel mask values. This requires avisynth+ 3.7.3 or higher.
+- Demuxers tool, mainly for mkv/webm/mp4/mov/ts/m2ts
 - Exhale Audio Encoder (https://gitlab.com/ecodis/exhale)
 - FFmpeg DCA/EAC3/THD Audio Encoders (https://ffmpeg.org/)
 - BestSource avisynth support (https://github.com/vapoursynth/bestsource/releases)
@@ -33,7 +34,6 @@ From time to time, I upload directly on [github Release page](https://github.com
 
 - [ ] Add VVC Video Encoder (dunno which one yet)
 - [ ] Add Bitrate Video Viewer
-- [ ] Add Demuxers tool
 - [ ] ...
 
 ## Repository Activity
